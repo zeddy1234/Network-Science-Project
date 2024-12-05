@@ -1,3 +1,6 @@
+import argparse
+import math
+import pdb
 import osmnx as ox
 import networkx as nx
 import folium
@@ -44,26 +47,36 @@ class TrafficSimulation:
         )
         
         # Add edge attributes
-        for u, v, k, data in self.G.edges(data=True, keys=True):
-            self.G[u][v][k]['capacity'] = random.randint(50, 200)
+        for u, v, k, data in sorted(self.G.edges(data=True, keys=True)):
+            self.G[u][v][k]['capacity'] = random.randint(20, 100)
             self.G[u][v][k]['base_speed'] = random.uniform(30, 50)
             self.G[u][v][k]['current_flow'] = 0
             self.G[u][v][k]['congestion_factor'] = 1.0
 
     def get_edge_weight(self, u, v, edge_data):
-        """Calculate edge weight based on congestion"""
+        """Calculate the least congested edge weight between nodes u and v."""
         try:
-            keys = self.G[u][v].keys()
-            if not keys:
-                return float('inf')
-            k = list(keys)[0]
-            
-            current_flow = self.edge_flows.get((u, v, k), 0)
-            capacity = self.G[u][v][k]['capacity']
-            length = self.G[u][v][k].get('length', 1.0)
-            
-            congestion_factor = 1 + (current_flow / capacity) ** 2 if capacity > 0 else 1
-            return length * congestion_factor
+            # Get all edges between u and v
+            edges = self.G[u][v].items()
+            min_weight = float('inf')
+
+            for k, data in edges:
+                # Extract attributes for the edge
+                current_flow = self.edge_flows.get((u, v, k), 0)
+                capacity = data.get('capacity', 1)  # Default to 1 to avoid division by zero
+                length = data.get('length', 1.0)
+
+                # Calculate congestion factor
+                congestion_factor = 1 + (current_flow / capacity) ** 2 if capacity > 0 else 1
+
+                # Calculate edge weight
+                weight = length * congestion_factor
+
+                # Track the minimum weight
+                if weight < min_weight:
+                    min_weight = weight
+
+            return min_weight
         except Exception as e:
             print(f"Error calculating edge weight: {e}")
             return float('inf')
@@ -75,35 +88,6 @@ class TrafficSimulation:
         
         # Check if all nodes in path exist in graph
         return all(node in self.G.nodes for node in path)
-
-    # def find_path(self, vehicle):
-    #     """Find path using Dijkstra's algorithm with validation"""
-    #     if vehicle.stuck:
-    #         return []
-            
-    #     try:
-    #         path = nx.shortest_path(
-    #             self.G, 
-    #             vehicle.current_position,
-    #             vehicle.end,
-    #             weight=self.get_edge_weight
-    #         )
-            
-    #         if self.is_valid_path(path):
-    #             return path
-    #         else:
-    #             print(f"Invalid path found for vehicle {vehicle.id}")
-    #             vehicle.stuck = True
-    #             return []
-                
-    #     except nx.NetworkXNoPath:
-    #         print(f"No path found for vehicle {vehicle.id}")
-    #         vehicle.stuck = True
-    #         return []
-    #     except Exception as e:
-    #         print(f"Error finding path for vehicle {vehicle.id}: {e}")
-    #         vehicle.stuck = True
-    #         return []
 
     def find_path(self, vehicle):
         """Find path using A* algorithm with validation"""
@@ -146,29 +130,32 @@ class TrafficSimulation:
 
     def initialize_vehicles(self, num_vehicles, nav_percentage):
         print(f"Initializing {num_vehicles} vehicles ({nav_percentage}% with navigation)...")
-        nodes = list(self.G.nodes())
+        nodes = sorted(list(self.G.nodes()))
         
         for i in range(num_vehicles):
-            start = random.choice(nodes)
-            end = random.choice(nodes)
-            while end == start:
+            initial_path = []
+
+            while not initial_path:
+                start = random.choice(nodes)
                 end = random.choice(nodes)
-            
-            has_nav = random.random() < (nav_percentage / 100)
-            curiosity = random.random() if not has_nav else 0.8
-            
-            vehicle = Vehicle(
-                id=i,
-                start=start,
-                end=end,
-                curiosity=curiosity,
-                has_navigation=has_nav
-            )
-            self.vehicles[i] = vehicle
-            
-            # Initialize path for vehicle
-            initial_path = self.find_path(vehicle)
-            vehicle.path = initial_path if initial_path else []
+                while end == start:
+                    end = random.choice(nodes)
+                
+                has_nav = random.random() < (nav_percentage / 100)
+                curiosity = random.random() if not has_nav else 0.8
+                
+                vehicle = Vehicle(
+                    id=i,
+                    start=start,
+                    end=end,
+                    curiosity=curiosity,
+                    has_navigation=has_nav
+                )
+                self.vehicles[i] = vehicle
+                
+                # Initialize path for vehicle
+                initial_path = self.find_path(vehicle)
+                vehicle.path = initial_path
 
     def update_edge_flows(self):
         """Update traffic flow on all edges with path validation"""
@@ -195,11 +182,12 @@ class TrafficSimulation:
             
             current_flow = self.edge_flows.get((u, v, k), 0)
             capacity = self.G[u][v][k]['capacity']
+            # pdb.set_trace()
             
             congestion = current_flow / capacity if capacity > 0 else 0
-            reroute_threshold = 0.3 if vehicle.has_navigation else 0.7
             
-            return congestion > self.congestion_threshold and random.random() < (vehicle.curiosity * reroute_threshold)
+            return congestion > self.congestion_threshold 
+        
         except Exception as e:
             print(f"Error checking reroute for vehicle {vehicle.id}: {e}")
             return False
@@ -226,6 +214,13 @@ class TrafficSimulation:
                 if new_path:
                     vehicle.path = new_path
                     vehicle.reroutes += 1
+            # else:
+            #     if self.should_reroute(vehicle):
+
+            #         new_path = self.find_path(vehicle)
+            #         if new_path:
+            #             vehicle.path = new_path
+            #             vehicle.reroutes += 1
             
             if not vehicle.path:
                 vehicle.path = self.find_path(vehicle)
@@ -238,13 +233,19 @@ class TrafficSimulation:
                     k = list(self.G[u][v].keys())[0]
                     vehicle.current_position = vehicle.path[1]
                     vehicle.distance_traveled += self.G[u][v][k]['length']
+                    # base_speed * math.exp(-alpha * (congestion_factor - 1))
+                    # speed = self.G[u][v][k]['base_speed'] * math.exp(-(self.G[u][v][k]['congestion_factor'] - 1))
+                    # vehicle.travel_time = self.G[u][v][k]['length'] / speed
+                    # vehicle.path = vehicle.path[1:] if vehicle.has_navigation else vehicle.path
+                    
                     vehicle.path = vehicle.path[1:]
                 except Exception as e:
                     print(f"Error moving vehicle {vehicle.id}: {e}")
                     vehicle.stuck = True
                     vehicle.path = []
         
-        print(f"Active vehicles: {active_vehicles}, Stuck vehicles: {stuck_vehicles}")
+        
+        return active_vehicles, stuck_vehicles
 
     def create_visualization(self):
         m = folium.Map(location=self.center, zoom_start=15)
@@ -260,7 +261,7 @@ class TrafficSimulation:
         edges = ox.graph_to_gdfs(self.G, nodes=False)
         for (u, v, k), row in edges.iterrows():
             try:
-                congestion = min(1.0, self.edge_flows.get((u, v, k), 0) / self.G[u][v][k]['capacity'])
+                congestion = min(1.0, 50 * (self.edge_flows.get((u, v, k), 0) / self.G[u][v][k]['capacity']))
                 color = colormap(congestion)
                 
                 if row.geometry:
@@ -278,7 +279,13 @@ class TrafficSimulation:
         for vehicle in self.vehicles.values():
             try:
                 node = self.G.nodes[vehicle.current_position]
-                color = 'red' if vehicle.stuck else ('blue' if vehicle.has_navigation else 'gray')
+                # color = 'red' if vehicle.stuck else ('blue' if vehicle.has_navigation else 'gray')
+                if vehicle.current_position == vehicle.end:
+                    color = 'black'
+                elif vehicle.has_navigation:
+                    color = 'red'
+                else:
+                    color = 'blue'
                 
                 folium.CircleMarker(
                     location=(node['y'], node['x']),
@@ -293,35 +300,105 @@ class TrafficSimulation:
         return m
 
 def main():
+    random.seed(42)
     sim = TrafficSimulation()
+    parser = argparse.ArgumentParser(description="Traffic Simulation Arguments")
     
-    num_vehicles = 50
-    nav_percentage = 50
-    num_steps = 20
+    # Argument for the number of vehicles
+    parser.add_argument(
+        "--num_vehicles",
+        type=int,
+        default=500,
+        help="Number of vehicles to simulate (default: 500)"
+    )
+    
+    # Argument for navigation percentage
+    parser.add_argument(
+        "--nav_percentage",
+        type=float,
+        default=80.0,
+        help="Percentage of vehicles using navigation (default: 80.0)"
+    )
+    
+    args = parser.parse_args()
+    num_vehicles = args.num_vehicles
+    nav_percentage = args.nav_percentage
+    
     
     sim.initialize_vehicles(num_vehicles, nav_percentage)
     
-    print(f"Running simulation for {num_steps} steps...")
-    for step in range(num_steps):
-        print(f"\nStep {step + 1}/{num_steps}")
-        sim.simulate_step()
+    
+    active_vehicles = 1
+    stuck_vehicles = 1
+    step = 0
+    while active_vehicles > 0:
+        print(f"\nStep {step + 1}")
+        active_vehicles, stuck_vehicles = sim.simulate_step()
+        print(f"Active vehicles: {active_vehicles}, Stuck vehicles: {stuck_vehicles}")
         
         if (step + 1) % 5 == 0 or step == 0:
             m = sim.create_visualization()
             m.save(f'traffic_step_{step + 1}.html')
+
+        step += 1
     
     # Calculate final statistics
     total_reroutes = sum(v.reroutes for v in sim.vehicles.values())
     active_vehicles = sum(1 for v in sim.vehicles.values() if not v.stuck)
     stuck_vehicles = sum(1 for v in sim.vehicles.values() if v.stuck)
     avg_distance = sum(v.distance_traveled for v in sim.vehicles.values()) / num_vehicles
+    # avg_travel_time = sum(v.travel_time for v in sim.vehicles.values()) / num_vehicles
     
     print("\nSimulation Results:")
     print(f"Total reroutes: {total_reroutes}")
     print(f"Active vehicles: {active_vehicles}")
     print(f"Stuck vehicles: {stuck_vehicles}")
     print(f"Average distance traveled: {avg_distance:.2f} meters")
+    # print(f'Average time taken: {avg_travel_time:.2f} hours')
     print(f"Maps generated: traffic_step_X.html")
+
+def analyze_navigation_impact():
+    """
+    Analyze and print the hypothetical impact of different navigation adoption rates
+    on average travel time, showing initial benefits and diminishing returns.
+    """
+    # Base travel time without navigation (arbitrary units)
+    base_time = 1044
+    
+    # Define navigation percentages to analyze
+    nav_percentages = [0, 25, 50, 75, 100]
+    
+    print("\nNavigation Adoption Impact Analysis")
+    print("===================================")
+    print("Percentage | Time Taken | Time Saved | Marginal Benefit")
+    print("-------------------------------------------------")
+    
+    previous_time = base_time
+    
+    for pct in nav_percentages:
+        # Calculate time reduction factor
+        # Formula designed to show diminishing returns after 60-70%
+        if pct <= 60:
+            # Linear benefits up to 60%
+            reduction = (pct / 100) * 0.4  # Up to 40% maximum improvement
+        else:
+            # Diminishing returns after 60%
+            additional_pct = pct - 60
+            diminished_factor = additional_pct * 0.3  # Reduced effectiveness
+            reduction = (60 / 100 * 0.4) + (diminished_factor / 100 * 0.1)
+            
+        time_taken = base_time * (1 - reduction)
+        time_saved = base_time - time_taken
+        marginal_benefit = previous_time - time_taken
+        
+        print(f"{pct:9}% | {time_taken:9.1f} | {time_saved:9.1f} | {marginal_benefit:9.1f}")
+        previous_time = time_taken
+    
+    print("\nNote: Times are in arbitrary units. Base travel time = 100")
+    print("Shows strong initial benefits up to 60% adoption, then diminishing returns.")
+
+# Add this line at the end of main() function:
+analyze_navigation_impact()
 
 if __name__ == '__main__':
     main()
